@@ -5,14 +5,13 @@ from langfence import (
     LanguagePolicy,
     OutputContract,
     RegexConstraint,
+    StructuralTagConstraint,
     compile_request,
 )
 
 
 def test_vllm_json_schema_openai_response_format() -> None:
-    contract = OutputContract(
-        format=JsonSchemaConstraint(name="answer", schema={"type": "object"})
-    )
+    contract = OutputContract(format=JsonSchemaConstraint(name="answer", schema={"type": "object"}))
 
     compiled = compile_request(
         "vllm",
@@ -49,6 +48,19 @@ def test_vllm_choice_openai_is_native_choice() -> None:
     )
 
     assert compiled.payload["extra_body"]["structured_outputs"]["choice"] == ["yes", "no"]
+
+
+def test_vllm_structural_tag_openai_uses_structured_outputs() -> None:
+    spec = {"type": "structural_tag", "structures": [{"begin": "<answer>", "end": "</answer>"}]}
+
+    compiled = compile_request(
+        "vllm",
+        None,
+        OutputContract(format=StructuralTagConstraint(spec=spec)),
+    )
+
+    assert compiled.payload["extra_body"]["structured_outputs"]["structural_tag"] == spec
+    assert "response_format" not in compiled.payload
 
 
 def test_sglang_json_schema_openai_response_format() -> None:

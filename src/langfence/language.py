@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from typing import Literal
+from importlib import import_module
+from threading import Lock
+from typing import Any, Literal
 
 LanguageAction = Literal["warn", "fail", "retry", "repair"]
+_LINGUA_MISSING = object()
+_LINGUA_LOCK = Lock()
+_lingua_detector_instance: Any = _LINGUA_MISSING
 
 
 @dataclass(frozen=True)
@@ -38,12 +42,6 @@ class LanguageDetection:
     metadata: dict[str, float] = field(default_factory=dict)
 
 
-_CJK_RE = re.compile(r"[\u3400-\u9fff]")
-_HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u30ff]")
-_HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
-_LATIN_RE = re.compile(r"[A-Za-z]")
-
-
 def detect_language(text: str, detector: str = "heuristic") -> LanguageDetection:
     if detector == "lingua":
         lingua_result = _detect_with_lingua(text)
@@ -54,12 +52,10 @@ def detect_language(text: str, detector: str = "heuristic") -> LanguageDetection
 
 
 def _detect_with_lingua(text: str) -> LanguageDetection | None:
-    try:
-        from lingua import LanguageDetectorBuilder  # type: ignore[import-not-found]
-    except ImportError:
+    detector = _lingua_detector()
+    if detector is None:
         return None
 
-    detector = LanguageDetectorBuilder.from_all_languages().with_preloaded_language_models().build()
     values = detector.compute_language_confidence_values(text)
     if not values:
         return LanguageDetection(language="unknown", confidence=0.0, detector="lingua")
@@ -72,16 +68,51 @@ def _detect_with_lingua(text: str) -> LanguageDetection | None:
     )
 
 
-def _detect_with_heuristics(text: str) -> LanguageDetection:
-    chars = [char for char in text if not char.isspace()]
-    if not chars:
-        return LanguageDetection(language="unknown", confidence=0.0, detector="heuristic")
+def _lingua_detector() -> Any | None:
+    global _lingua_detector_instance
+    if _lingua_detector_instance is not _LINGUA_MISSING:
+        return _lingua_detector_instance
 
-    cjk = len(_CJK_RE.findall(text))
-    kana = len(_HIRAGANA_KATAKANA_RE.findall(text))
-    hangul = len(_HANGUL_RE.findall(text))
-    latin = len(_LATIN_RE.findall(text))
-    total = max(len(chars), 1)
+    with _LINGUA_LOCK:
+        if _lingua_detector_instance is _LINGUA_MISSING:
+            try:
+                lingua = import_module("lingua")
+            except ImportError:
+                _lingua_detector_instance = None
+            else:
+                _lingua_detector_instance = (
+                    lingua.LanguageDetectorBuilder.from_all_languages()
+                    .with_preloaded_language_models()
+                    .build()
+                )
+
+    return _lingua_detector_instance
+
+
+def _detect_with_heuristics(text: str) -> LanguageDetection:
+    cjk = 0
+    kana = 0
+    hangul = 0
+    latin = 0
+    total = 0
+
+    for char in text:
+        if char.isspace():
+            continue
+
+        total += 1
+        codepoint = ord(char)
+        if 0x3400 <= codepoint <= 0x9FFF:
+            cjk += 1
+        if 0x3040 <= codepoint <= 0x30FF:
+            kana += 1
+        if 0xAC00 <= codepoint <= 0xD7AF:
+            hangul += 1
+        if "A" <= char <= "Z" or "a" <= char <= "z":
+            latin += 1
+
+    if total == 0:
+        return LanguageDetection(language="unknown", confidence=0.0, detector="heuristic")
 
     scores = {
         "zh": cjk / total,

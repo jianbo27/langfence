@@ -4,7 +4,13 @@ from typing import Any
 import httpx
 import pytest
 
-from langfence import ChoiceConstraint, JsonSchemaConstraint, LanguagePolicy, OutputContract
+from langfence import (
+    ChoiceConstraint,
+    GrammarConstraint,
+    JsonSchemaConstraint,
+    LanguagePolicy,
+    OutputContract,
+)
 from langfence.clients import LangFenceClient, LangFenceClientError, LangFenceHTTPError
 
 
@@ -185,6 +191,223 @@ def test_chat_retries_with_repair_instruction_after_validation_failure() -> None
     assert len(repair_messages) == 1
     assert len(repair_messages[0]) < 240
     assert "choice.invalid" in repair_messages[0]
+
+
+def test_chat_returns_final_answer_without_visible_reasoning_block() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response('<think>private reasoning</think>\n{"answer":"ok"}')
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            format=JsonSchemaConstraint(
+                schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+            )
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.text == '{"answer":"ok"}'
+
+
+def test_language_fail_action_does_not_retry() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("English leak")
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            language=LanguagePolicy(
+                include=["zh"], exclude=["en"], action="fail", min_confidence=0.2
+            )
+        ),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert not result.ok
+    assert result.attempts == 1
+    assert len(requests) == 1
+
+
+def test_language_warn_action_returns_warning_without_retry() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("English leak")
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            language=LanguagePolicy(
+                include=["zh"], exclude=["en"], action="warn", min_confidence=0.2
+            )
+        ),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.attempts == 1
+    assert len(requests) == 1
+    assert any(issue.code == "language.excluded" for issue in result.validation.warnings)
+
+
+def test_language_retry_action_retries_without_repair_instruction() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = iter([_openai_response("English leak"), _openai_response("这是中文回答。")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return next(responses)
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            language=LanguagePolicy(
+                include=["zh"], exclude=["en"], action="retry", min_confidence=0.2
+            )
+        ),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.attempts == 2
+    assert len(requests) == 2
+    assert requests[1]["messages"] == requests[0]["messages"]
+
+
+def test_language_repair_action_retries_with_repair_instruction() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = iter([_openai_response("English leak"), _openai_response("这是中文回答。")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return next(responses)
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            language=LanguagePolicy(
+                include=["zh"], exclude=["en"], action="repair", min_confidence=0.2
+            )
+        ),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.attempts == 2
+    repair_messages = [
+        message["content"]
+        for message in requests[1]["messages"]
+        if message["role"] == "system"
+        and "Previous response failed output contract validation" in message["content"]
+    ]
+    assert len(repair_messages) == 1
+    assert "language.excluded" in repair_messages[0]
+
+
+def test_language_retry_does_not_override_format_failure() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = iter([_openai_response("English leak"), _openai_response("批准")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return next(responses)
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(
+            format=ChoiceConstraint(["批准"]),
+            language=LanguagePolicy(
+                include=["zh"], exclude=["en"], action="retry", min_confidence=0.2
+            ),
+        ),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.attempts == 2
+    repair_messages = [
+        message["content"]
+        for message in requests[1]["messages"]
+        if message["role"] == "system"
+        and "Previous response failed output contract validation" in message["content"]
+    ]
+    assert len(repair_messages) == 1
+    assert "choice.invalid" in repair_messages[0]
+
+
+def test_vllm_provider_enforced_grammar_skips_local_format_validation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response("ok")
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=GrammarConstraint('root ::= "ok"')),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.text == "ok"
+
+
+def test_openai_compatible_grammar_requires_local_validation_and_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response("ok")
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=GrammarConstraint('root ::= "ok"')),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert not result.ok
+    assert result.validation.issues[0].code == "grammar.validation_unavailable"
 
 
 def test_provider_error_body_hidden_by_default() -> None:

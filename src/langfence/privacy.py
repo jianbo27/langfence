@@ -22,6 +22,7 @@ _PROMPT_KEYS = {
     "inputs",
     "output",
     "prompt",
+    "system",
     "text",
 }
 

@@ -25,8 +25,9 @@ def decide_next_step(
     if language_policy is None:
         return PolicyDecision("fail", "Output violates the format contract.")
 
-    language_issues = [issue for issue in result.errors if issue.code.startswith("language.")]
-    if not language_issues:
+    errors = result.errors
+    language_issues = [issue for issue in errors if issue.code.startswith("language.")]
+    if not language_issues or len(language_issues) != len(errors):
         return PolicyDecision("fail", "Output violates the format contract.")
 
     if language_policy.action == "warn":

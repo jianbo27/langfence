@@ -36,10 +36,7 @@ def compile(
     provider: Annotated[
         str,
         typer.Option(
-            help=(
-                "Provider: vllm, sglang, openai-compatible, litellm, "
-                "anthropic-compatible."
-            )
+            help=("Provider: vllm, sglang, openai-compatible, litellm, anthropic-compatible.")
         ),
     ],
     contract: Annotated[Path, typer.Option(help="YAML contract file.")],
@@ -197,10 +194,10 @@ def proxy(
 ) -> None:
     try:
         import uvicorn
+
+        from langfence.service.app import create_app
     except ImportError as exc:
         raise typer.BadParameter("Install with the 'service' extra to run the proxy.") from exc
-
-    from langfence.service.app import create_app
 
     default_contract = load_contract(contract) if contract else None
     uvicorn.run(

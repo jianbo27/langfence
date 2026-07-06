@@ -17,6 +17,18 @@ def test_redacts_message_content() -> None:
     assert redacted["response_format"] == {"type": "json_schema"}
 
 
+def test_redacts_anthropic_system_prompt() -> None:
+    payload = {
+        "system": "private system prompt",
+        "messages": [{"role": "user", "content": "private prompt"}],
+    }
+
+    redacted = redact_for_display(payload)
+
+    assert redacted["system"] == REDACTED
+    assert redacted["messages"][0]["content"] == REDACTED
+
+
 def test_redacts_secret_keys() -> None:
     payload = {
         "Authorization": "Bearer secret",

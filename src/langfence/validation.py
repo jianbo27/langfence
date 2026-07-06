@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
@@ -28,6 +29,7 @@ _VISIBLE_REASONING_BLOCK_RE = re.compile(
     r")\s*",
     flags=re.DOTALL | re.IGNORECASE,
 )
+_VISIBLE_REASONING_PREFIXES = ("<think", "<reasoning", "```think", "```reasoning")
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class ValidationResult:
     ok: bool
     issues: tuple[ValidationIssue, ...] = ()
     parsed: Any | None = None
+    text: str = ""
 
     @property
     def errors(self) -> tuple[ValidationIssue, ...]:
@@ -55,11 +58,24 @@ class ValidationResult:
 
 
 def validate_output(text: str, contract: OutputContract) -> ValidationResult:
+    return _validate_output(text, contract, skip_format_validation=False)
+
+
+def validate_provider_enforced_output(text: str, contract: OutputContract) -> ValidationResult:
+    return _validate_output(text, contract, skip_format_validation=True)
+
+
+def _validate_output(
+    text: str,
+    contract: OutputContract,
+    *,
+    skip_format_validation: bool,
+) -> ValidationResult:
     issues: list[ValidationIssue] = []
     parsed: Any | None = None
     validation_text = extract_final_answer(text)
 
-    if contract.format is not None:
+    if contract.format is not None and not skip_format_validation:
         parsed = _validate_format(validation_text, contract, issues)
 
     if contract.language is not None:
@@ -69,17 +85,26 @@ def validate_output(text: str, contract: OutputContract) -> ValidationResult:
         ok=not any(issue.severity == "error" for issue in issues),
         issues=tuple(issues),
         parsed=parsed,
+        text=validation_text,
     )
 
 
 def extract_final_answer(text: str) -> str:
     """Remove leading visible reasoning blocks without changing provider requests."""
     previous = text
-    while True:
+    while _has_visible_reasoning_prefix(previous):
         stripped = _VISIBLE_REASONING_BLOCK_RE.sub("", previous, count=1)
         if stripped == previous:
-            return previous.strip()
+            break
         previous = stripped
+    return previous.strip()
+
+
+def _has_visible_reasoning_prefix(text: str) -> bool:
+    index = 0
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return text[index : index + 16].lower().startswith(_VISIBLE_REASONING_PREFIXES)
 
 
 def _validate_format(
@@ -101,14 +126,19 @@ def _validate_format(
             )
             return None
 
-        validator = Draft202012Validator(constraint.schema)
-        errors = sorted(validator.iter_errors(parsed), key=_jsonschema_error_key)
+        validator = _get_jsonschema_validator(constraint.schema)
+        if validator.is_valid(parsed):
+            return parsed
+
+        errors = list(validator.iter_errors(parsed))
+        if len(errors) > 1:
+            errors.sort(key=_jsonschema_error_key)
         for error in errors:
             issues.append(_jsonschema_issue(error))
         return parsed
 
     if isinstance(constraint, RegexConstraint):
-        if re.fullmatch(constraint.pattern, text, flags=re.DOTALL) is None:
+        if _compiled_regex(constraint.pattern).fullmatch(text) is None:
             issues.append(
                 ValidationIssue(
                     code="regex.mismatch",
@@ -134,10 +164,10 @@ def _validate_format(
             ValidationIssue(
                 code="grammar.validation_unavailable",
                 message=(
-                    "Grammar validation requires the provider backend; only request "
-                    "compilation is checked."
+                    "Grammar validation requires provider-side enforcement and is unavailable "
+                    "for local post-validation."
                 ),
-                severity="warning",
+                severity="error",
             )
         )
         return None
@@ -147,10 +177,10 @@ def _validate_format(
             ValidationIssue(
                 code="structural_tag.validation_unavailable",
                 message=(
-                    "Structural tag validation is provider-specific; only request "
-                    "compilation is checked."
+                    "Structural tag validation requires provider-side enforcement and is "
+                    "unavailable for local post-validation."
                 ),
-                severity="warning",
+                severity="error",
             )
         )
         return None
@@ -267,6 +297,31 @@ def _is_language_metadata_value(value: str, path: tuple[str, ...]) -> bool:
     return bool(re.fullmatch(r"[A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?", value.strip()))
 
 
+def _get_jsonschema_validator(schema: dict[str, Any]) -> Draft202012Validator:
+    try:
+        schema_key = _jsonschema_cache_key(schema)
+    except (TypeError, ValueError):
+        return Draft202012Validator(schema)
+    return _cached_jsonschema_validator(schema_key)
+
+
+def _jsonschema_cache_key(schema: dict[str, Any]) -> str:
+    return json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+@lru_cache(maxsize=256)
+def _cached_jsonschema_validator(schema_key: str) -> Draft202012Validator:
+    schema = json.loads(schema_key)
+    if not isinstance(schema, dict):
+        raise TypeError("JSON Schema cache key did not decode to an object.")
+    return Draft202012Validator(schema)
+
+
+@lru_cache(maxsize=512)
+def _compiled_regex(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern, flags=re.DOTALL)
+
+
 def _jsonschema_error_key(error: ValidationError) -> str:
     return ".".join(str(part) for part in error.absolute_path)
 
@@ -275,7 +330,7 @@ def _jsonschema_issue(error: ValidationError) -> ValidationIssue:
     path = ".".join(str(part) for part in error.absolute_path) or "$"
     return ValidationIssue(
         code="json_schema.invalid",
-        message=error.message,
+        message=f"Output failed JSON Schema validation at {path}.",
         path=path,
         metadata={"validator": error.validator},
     )

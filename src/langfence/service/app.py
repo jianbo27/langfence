@@ -7,11 +7,17 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from langfence.adapters import compile_request
+from langfence.constraints import GrammarConstraint, StructuralTagConstraint
 from langfence.contracts import OutputContract
-from langfence.privacy import redact_for_display
+from langfence.privacy import REDACTED, redact_for_display
 from langfence.serialization import contract_from_dict
 from langfence.service.schemas import CompileRequestBody, ValidateRequestBody
-from langfence.validation import ValidationIssue, validate_output
+from langfence.validation import (
+    ValidationIssue,
+    ValidationResult,
+    validate_output,
+    validate_provider_enforced_output,
+)
 
 
 def create_app(
@@ -21,7 +27,7 @@ def create_app(
     default_contract: OutputContract | None = None,
     include_provider_error_body: bool = False,
 ) -> FastAPI:
-    app = FastAPI(title="LangFence proxy", version="0.1.0")
+    app = FastAPI(title="LangFence proxy", version="0.1.1")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -49,7 +55,7 @@ def create_app(
     async def validate_endpoint(body: ValidateRequestBody) -> dict[str, Any]:
         result = validate_output(body.output, contract_from_dict(body.contract))
         payload = _validation_payload(result.issues, result.ok)
-        payload["parsed"] = redact_for_display(result.parsed) if body.redact else result.parsed
+        payload["parsed"] = REDACTED if body.redact and result.parsed is not None else result.parsed
         payload["redacted"] = body.redact
         return payload
 
@@ -112,7 +118,7 @@ def create_app(
             raise HTTPException(status_code=502, detail="Provider returned a non-object JSON body")
         data: dict[str, Any] = response_data
         text = _extract_openai_text(data)
-        validation = validate_output(text, contract)
+        validation = _validate_provider_output(provider, text, contract)
         data["output_contract"] = _validation_payload(validation.issues, validation.ok)
         return data
 
@@ -132,11 +138,14 @@ def _extract_contract(
 def _extract_openai_text(data: dict[str, Any]) -> str:
     try:
         content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return ""
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Provider response is missing message content.",
+        ) from exc
     if isinstance(content, str):
         return content
-    return str(content)
+    raise HTTPException(status_code=502, detail="Provider response content must be a string.")
 
 
 def _validation_payload(issues: tuple[ValidationIssue, ...], ok: bool) -> dict[str, Any]:
@@ -153,3 +162,14 @@ def _validation_payload(issues: tuple[ValidationIssue, ...], ok: bool) -> dict[s
             for issue in issues
         ],
     }
+
+
+def _validate_provider_output(
+    provider: str, text: str, contract: OutputContract
+) -> ValidationResult:
+    if provider in {"vllm", "sglang"} and isinstance(
+        contract.format,
+        GrammarConstraint | StructuralTagConstraint,
+    ):
+        return validate_provider_enforced_output(text, contract)
+    return validate_output(text, contract)

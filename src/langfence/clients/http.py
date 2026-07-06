@@ -7,8 +7,15 @@ from typing import Any, Literal, TypeAlias
 import httpx
 
 from langfence.adapters import compile_request
+from langfence.constraints import GrammarConstraint, StructuralTagConstraint
 from langfence.contracts import OutputContract, RequestMode
-from langfence.validation import ValidationIssue, ValidationResult, validate_output
+from langfence.retry import decide_next_step
+from langfence.validation import (
+    ValidationIssue,
+    ValidationResult,
+    validate_output,
+    validate_provider_enforced_output,
+)
 
 ClientProfile: TypeAlias = Literal["vllm", "sglang", "openai", "litellm", "anthropic"]
 ClientTransport: TypeAlias = Literal["openai", "anthropic"]
@@ -128,10 +135,10 @@ class LangFenceClient:
             compiled = self._compile(messages, request_options, repair_instructions)
             warnings.extend(compiled.warnings)
             response_data = self._post(compiled.payload)
-            text = self._extract_text(response_data)
-            validation = validate_output(text, self.contract)
+            raw_text = self._extract_text(response_data)
+            validation = self._validate(raw_text)
             last_result = ChatResult(
-                text=text,
+                text=validation.text,
                 validation=validation,
                 attempts=attempt,
                 profile=self.profile,
@@ -143,8 +150,19 @@ class LangFenceClient:
             if validation.ok:
                 return last_result
 
-            if attempt < attempts_allowed:
+            decision = decide_next_step(validation, self.contract.language)
+            if decision.action == "warn":
+                return last_result
+
+            if decision.action == "fail":
+                if _has_only_language_errors(validation) or attempt >= attempts_allowed:
+                    return last_result
                 repair_instructions.append(_repair_instruction(validation.issues))
+                continue
+
+            if decision.action in {"retry", "repair"} and attempt < attempts_allowed:
+                if decision.action == "repair":
+                    repair_instructions.append(_repair_instruction(validation.issues))
                 continue
 
             return last_result
@@ -164,6 +182,14 @@ class LangFenceClient:
         if self.transport == "anthropic":
             return self._compile_anthropic_transport(messages, request_options, repair_instructions)
         raise ValueError(f"Unsupported transport: {self.transport}")
+
+    def _validate(self, text: str) -> ValidationResult:
+        if self.profile in {"vllm", "sglang"} and isinstance(
+            self.contract.format,
+            GrammarConstraint | StructuralTagConstraint,
+        ):
+            return validate_provider_enforced_output(text, self.contract)
+        return validate_output(text, self.contract)
 
     def _compile_openai_transport(
         self,
@@ -353,13 +379,16 @@ def _repair_instruction(issues: Sequence[ValidationIssue]) -> str:
     )
 
 
+def _has_only_language_errors(validation: ValidationResult) -> bool:
+    errors = validation.errors
+    return bool(errors) and all(issue.code.startswith("language.") for issue in errors)
+
+
 def _extract_openai_text(response_data: Mapping[str, Any]) -> str:
     try:
         choice = response_data["choices"][0]
     except (KeyError, IndexError, TypeError) as exc:
-        raise LangFenceResponseError(
-            "OpenAI-compatible response is missing choices[0]."
-        ) from exc
+        raise LangFenceResponseError("OpenAI-compatible response is missing choices[0].") from exc
 
     if not isinstance(choice, Mapping):
         raise LangFenceResponseError("OpenAI-compatible response choice is not an object.")

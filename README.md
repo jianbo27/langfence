@@ -133,6 +133,7 @@ langfence validate --contract examples/contract.zh.yaml --input output.txt
 Run the optional OpenAI-compatible proxy:
 
 ```bash
+pip install "langfence[service]"
 langfence proxy --provider vllm --base-url http://localhost:8000/v1
 ```
 

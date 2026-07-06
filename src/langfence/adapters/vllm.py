@@ -62,7 +62,8 @@ def _compile_openai(
         return
 
     if isinstance(constraint, StructuralTagConstraint):
-        payload["response_format"] = {"type": "structural_tag", **constraint.spec}
+        structured_outputs = _ensure_structured_outputs(payload)
+        structured_outputs["structural_tag"] = constraint.spec
         return
 
     structured_outputs = _ensure_structured_outputs(payload)

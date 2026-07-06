@@ -31,3 +31,9 @@ tmp/
 .env*
 !.env.example
 .pypirc
+llm.yaml
+llm.yml
+.llm.yaml
+.llm.yml
+**/llm.yaml
+**/llm.yml
