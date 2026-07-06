@@ -150,7 +150,11 @@ LangFence does not log prompts, outputs, or provider responses. HTTP error bodie
 hidden by default because providers may echo request content.
 
 LangFence validates text returned to the caller. It cannot inspect or constrain hidden
-reasoning traces or internal chain-of-thought that a provider does not expose.
+reasoning traces or internal chain-of-thought that a provider does not expose. If a
+local reasoning model returns a leading visible block such as `<think>...</think>`,
+LangFence strips that block before validation by default and checks the final answer.
+This keeps reasoning-model output quality intact: no extra constrained decoding or
+prompt pressure is added just to control the language of private reasoning.
 
 ## Development
 

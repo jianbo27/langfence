@@ -20,6 +20,15 @@ from langfence.language import detect_language
 
 IssueSeverity = Literal["warning", "error"]
 
+_VISIBLE_REASONING_BLOCK_RE = re.compile(
+    r"\A\s*(?:"
+    r"<(?P<tag>think|thinking|reasoning)>\s*.*?\s*</(?P=tag)>"
+    r"|"
+    r"```(?:think|thinking|reasoning)\s*.*?\s*```"
+    r")\s*",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class ValidationIssue:
@@ -48,18 +57,29 @@ class ValidationResult:
 def validate_output(text: str, contract: OutputContract) -> ValidationResult:
     issues: list[ValidationIssue] = []
     parsed: Any | None = None
+    validation_text = extract_final_answer(text)
 
     if contract.format is not None:
-        parsed = _validate_format(text, contract, issues)
+        parsed = _validate_format(validation_text, contract, issues)
 
     if contract.language is not None:
-        _validate_language(text, parsed, contract, issues)
+        _validate_language(validation_text, parsed, contract, issues)
 
     return ValidationResult(
         ok=not any(issue.severity == "error" for issue in issues),
         issues=tuple(issues),
         parsed=parsed,
     )
+
+
+def extract_final_answer(text: str) -> str:
+    """Remove leading visible reasoning blocks without changing provider requests."""
+    previous = text
+    while True:
+        stripped = _VISIBLE_REASONING_BLOCK_RE.sub("", previous, count=1)
+        if stripped == previous:
+            return previous.strip()
+        previous = stripped
 
 
 def _validate_format(
