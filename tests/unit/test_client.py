@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from langfence import ChoiceConstraint, JsonSchemaConstraint, LanguagePolicy, OutputContract
-from langfence.clients import LangFenceClient, LangFenceHTTPError
+from langfence.clients import LangFenceClient, LangFenceClientError, LangFenceHTTPError
 
 
 def _openai_response(content: str) -> httpx.Response:
@@ -204,3 +204,65 @@ def test_provider_error_body_hidden_by_default() -> None:
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.error_body is None
+
+
+def test_openai_none_content_is_response_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LangFenceClientError, match="text content"):
+        client.chat([{"role": "user", "content": "prompt"}])
+
+
+def test_anthropic_tool_only_content_is_response_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "lookup",
+                        "input": {"query": "x"},
+                    }
+                ]
+            },
+        )
+
+    client = LangFenceClient(
+        provider="anthropic",
+        base_url="https://provider.test/v1",
+        model="model-a",
+        contract=OutputContract(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LangFenceClientError, match="text content"):
+        client.chat([{"role": "user", "content": "prompt"}])
+
+
+def test_transport_error_is_wrapped_in_client_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LangFenceClientError, match="Provider request failed") as exc_info:
+        client.chat([{"role": "user", "content": "prompt"}])
+
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)

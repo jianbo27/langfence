@@ -149,6 +149,9 @@ langfence proxy --provider vllm --base-url http://localhost:8000/v1
 LangFence does not log prompts, outputs, or provider responses. HTTP error bodies are
 hidden by default because providers may echo request content.
 
+LangFence validates text returned to the caller. It cannot inspect or constrain hidden
+reasoning traces or internal chain-of-thought that a provider does not expose.
+
 ## Development
 
 ```bash

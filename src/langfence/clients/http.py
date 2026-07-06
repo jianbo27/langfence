@@ -219,11 +219,14 @@ class LangFenceClient:
         return _CompiledClientRequest(payload=payload, warnings=compiled.warnings)
 
     def _post(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        response = self._client.post(
-            self.base_url + _endpoint_for_transport(self.transport),
-            json=payload,
-            headers=self._request_headers(),
-        )
+        try:
+            response = self._client.post(
+                self.base_url + _endpoint_for_transport(self.transport),
+                json=payload,
+                headers=self._request_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise LangFenceClientError("Provider request failed.") from exc
         if response.status_code >= 400:
             raise LangFenceHTTPError(
                 response.status_code,
@@ -384,15 +387,19 @@ def _content_to_text(content: Any) -> str:
         return content
     if isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray, str)):
         parts: list[str] = []
+        found_text = False
         for item in content:
             if isinstance(item, Mapping):
                 text = item.get("text")
                 if isinstance(text, str):
+                    found_text = True
                     parts.append(text)
             elif isinstance(item, str):
+                found_text = True
                 parts.append(item)
-        return "".join(parts)
-    return str(content)
+        if found_text:
+            return "".join(parts)
+    raise LangFenceResponseError("Provider response did not contain text content.")
 
 
 def _unique(values: Iterable[str]) -> list[str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -57,7 +58,13 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
         contract = _extract_contract(body, default_contract)
         if contract is None:
             raise HTTPException(
@@ -94,7 +101,13 @@ def create_app(
                 detail["provider_error_body"] = response.text
             raise HTTPException(status_code=response.status_code, detail=detail)
 
-        response_data = response.json()
+        try:
+            response_data = response.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Provider returned a non-JSON body",
+            ) from exc
         if not isinstance(response_data, dict):
             raise HTTPException(status_code=502, detail="Provider returned a non-object JSON body")
         data: dict[str, Any] = response_data
