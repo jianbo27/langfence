@@ -1,0 +1,21 @@
+prompt_instruction: "Return a compact JSON object that follows the schema."
+format:
+  type: json_schema
+  name: localized_answer
+  strict: true
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+      language:
+        type: string
+        enum: ["zh"]
+    required: ["answer", "language"]
+    additionalProperties: false
+language:
+  include: ["zh"]
+  exclude: ["en", "ja"]
+  action: fail
+  min_confidence: 0.20
+  detector: heuristic

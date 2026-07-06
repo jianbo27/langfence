@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ProxyValidation(BaseModel):
+    ok: bool
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CompileRequestBody(BaseModel):
+    provider: str
+    messages: list[dict[str, Any]] | None = None
+    contract: dict[str, Any]
+    mode: str = "openai"
+    base_payload: dict[str, Any] = Field(default_factory=dict)
+    redact: bool = True
+
+
+class ValidateRequestBody(BaseModel):
+    contract: dict[str, Any]
+    output: str
+    redact: bool = True

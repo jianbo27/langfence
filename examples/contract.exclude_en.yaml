@@ -1,0 +1,9 @@
+prompt_instruction: "Avoid English prose in the final answer."
+format:
+  type: regex
+  pattern: "^[^A-Za-z]+$"
+language:
+  exclude: ["en"]
+  action: fail
+  min_confidence: 0.20
+  detector: heuristic

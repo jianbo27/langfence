@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# Local/private data and one-off redaction utilities.
+# Keep src/langfence/privacy.py tracked: it is package source code, not private data.
+private/
+local/
+tmp/
+*.local.py
+*.private.py
+*redact*.local.*
+*redaction*.local.*
+*.prompt
+*.prompts
+*.output
+*.outputs
+*.secret
+*.secrets
+*.token
+*.tokens
+*.env
+.env*
+!.env.example
