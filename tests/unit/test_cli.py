@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,19 @@ from typer.testing import CliRunner
 from langfence import cli
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(output: str) -> str:
+    """Collapse rich/ANSI rendering so message assertions survive CI terminals.
+
+    typer forces rich terminal output when GITHUB_ACTIONS is set, wrapping
+    error messages inside an ANSI-colored panel that splits them across lines.
+    """
+    text = _ANSI_RE.sub("", output)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return " ".join(text.split())
 
 
 def _install_mock_transport(
@@ -89,8 +103,8 @@ def test_compile_rejects_unknown_provider_cleanly(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert "bogus" in result.output
-    assert "Traceback" not in result.output
+    assert "bogus" in _plain(result.output)
+    assert "Traceback" not in _plain(result.output)
 
 
 def test_compile_missing_contract_file_is_clean_error(tmp_path: Path) -> None:
@@ -100,8 +114,8 @@ def test_compile_missing_contract_file_is_clean_error(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert "not found" in result.output
-    assert "Traceback" not in result.output
+    assert "not found" in _plain(result.output)
+    assert "Traceback" not in _plain(result.output)
 
 
 def test_compile_non_dict_base_payload_is_clean_error(tmp_path: Path) -> None:
@@ -123,7 +137,7 @@ def test_compile_non_dict_base_payload_is_clean_error(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert "--base-payload must contain a JSON object" in result.output
+    assert "--base-payload must contain a JSON object" in _plain(result.output)
 
 
 def test_validate_exit_code_1_and_redacts_parsed_by_default(tmp_path: Path) -> None:
@@ -482,8 +496,8 @@ def test_proxy_requires_service_extra(tmp_path: Path, monkeypatch: Any) -> None:
     )
 
     assert result.exit_code != 0
-    assert "service" in result.output
-    assert "Traceback" not in result.output
+    assert "service" in _plain(result.output)
+    assert "Traceback" not in _plain(result.output)
 
 
 def test_proxy_passes_violation_status_to_create_app(tmp_path: Path, monkeypatch: Any) -> None:
