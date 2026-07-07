@@ -5,11 +5,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class ProxyValidation(BaseModel):
-    ok: bool
-    issues: list[dict[str, Any]] = Field(default_factory=list)
-
-
 class CompileRequestBody(BaseModel):
     provider: str
     messages: list[dict[str, Any]] | None = None

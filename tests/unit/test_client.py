@@ -10,6 +10,7 @@ from langfence import (
     JsonSchemaConstraint,
     LanguagePolicy,
     OutputContract,
+    RegexConstraint,
 )
 from langfence.clients import LangFenceClient, LangFenceClientError, LangFenceHTTPError
 
@@ -509,3 +510,267 @@ def test_transport_error_is_wrapped_in_client_error() -> None:
         client.chat([{"role": "user", "content": "prompt"}])
 
     assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record retry backoff delays instead of actually sleeping."""
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "langfence.clients.http.time.sleep",
+        lambda seconds: delays.append(seconds),
+    )
+    return delays
+
+
+def test_vllm_regex_flattens_structured_outputs_into_body() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("123")
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=RegexConstraint(r"\d{3}")),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    # extra_body must be merged into the top-level wire body by _post.
+    assert "extra_body" not in requests[0]
+    assert requests[0]["structured_outputs"]["regex"] == r"\d{3}"
+
+
+def test_sglang_grammar_flattens_ebnf_into_body() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("ok")
+
+    client = LangFenceClient(
+        provider="sglang",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=GrammarConstraint('root ::= "ok"')),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert "extra_body" not in requests[0]
+    assert requests[0]["ebnf"] == 'root ::= "ok"'
+
+
+def test_stream_option_is_rejected() -> None:
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(),
+        client=httpx.Client(transport=httpx.MockTransport(lambda r: _openai_response("x"))),
+    )
+
+    with pytest.raises(ValueError, match="stream"):
+        client.chat([{"role": "user", "content": "prompt"}], stream=True)
+
+
+def test_retry_after_zero_on_429_then_success(no_sleep: list[float]) -> None:
+    requests: list[dict[str, Any]] = []
+    responses = iter(
+        [
+            httpx.Response(429, headers={"retry-after": "0"}, json={}),
+            _openai_response("approved"),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return next(responses)
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        max_retries=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    # attempts counts every issued request, including the retried one.
+    assert result.attempts == 2
+    assert len(requests) == 2
+    # Retry-After "0" means no backoff sleep.
+    assert no_sleep == []
+
+
+def test_retryable_502_exhausts_budget_and_raises(no_sleep: list[float]) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(502, json={})
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        max_retries=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LangFenceHTTPError) as exc_info:
+        client.chat([{"role": "user", "content": "prompt"}])
+
+    assert exc_info.value.status_code == 502
+    # 1 initial attempt + 2 retries = 3 requests, 2 backoff sleeps.
+    assert attempts == 3
+    assert len(no_sleep) == 2
+
+
+def test_transport_error_then_success_is_retried(no_sleep: list[float]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.TimeoutException("timed out", request=request)
+        return _openai_response("approved")
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        max_retries=1,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert result.attempts == 2
+    assert calls == 2
+    assert len(no_sleep) == 1
+
+
+def test_openai_grammar_short_circuits_without_burning_retries(no_sleep: list[float]) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("ok")
+
+    client = LangFenceClient(
+        provider="openai",
+        base_url="https://provider.test/v1",
+        model="model-a",
+        contract=OutputContract(format=GrammarConstraint('root ::= "ok"')),
+        max_retries=3,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert not result.ok
+    # Grammar cannot be validated locally under the openai profile; re-prompting
+    # cannot fix it, so the client returns after a single attempt.
+    assert result.attempts == 1
+    assert len(requests) == 1
+    assert no_sleep == []
+    assert result.validation.issues[0].code == "grammar.validation_unavailable"
+
+
+def test_vllm_grammar_warns_provider_enforced_and_skips_local_validation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Text that would NOT satisfy the grammar if validated locally.
+        return _openai_response("this does not match root")
+
+    client = LangFenceClient(
+        provider="vllm",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=GrammarConstraint('root ::= "ok"')),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.ok
+    assert any(
+        "enforced by the provider's constrained decoding" in warning
+        for warning in result.warnings
+    )
+
+
+def test_openai_wire_body_omits_max_tokens_by_default() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("approved")
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test/v1",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    client.chat([{"role": "user", "content": "prompt"}])
+
+    assert "max_tokens" not in requests[0]
+
+
+def test_openai_wire_body_includes_max_tokens_when_set() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _openai_response("approved")
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test/v1",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        max_tokens=128,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    client.chat([{"role": "user", "content": "prompt"}])
+
+    assert requests[0]["max_tokens"] == 128
+
+
+def test_retryable_status_backoff_is_exponential(no_sleep: list[float]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={})
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://provider.test",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved"])),
+        max_retries=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LangFenceHTTPError):
+        client.chat([{"role": "user", "content": "prompt"}])
+
+    # No Retry-After header -> exponential backoff base*2**(attempt-1): 0.5, 1.0.
+    assert no_sleep == [0.5, 1.0]

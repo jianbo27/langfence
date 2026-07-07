@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any
@@ -9,14 +10,21 @@ from typing import Annotated, Any
 import click
 import httpx
 import typer
+import yaml
 
 from langfence.adapters import compile_request
 from langfence.clients import LangFenceClient, LangFenceClientError, LangFenceHTTPError
+from langfence.clients.http import ANTHROPIC_VERSION
+from langfence.contracts import OutputContract
 from langfence.privacy import REDACTED, redact_for_display
 from langfence.serialization import load_contract
 from langfence.validation import ValidationIssue, ValidationResult, validate_output
 
-app = typer.Typer(no_args_is_help=True, help="Compile and validate LangFences.")
+app = typer.Typer(
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+    help="Compile and validate LangFences.",
+)
 
 CHAT_PROVIDERS = {
     "vllm",
@@ -27,7 +35,8 @@ CHAT_PROVIDERS = {
     "anthropic",
     "anthropic-compatible",
 }
-ANTHROPIC_VERSION = "2023-06-01"
+
+__all__ = ["ANTHROPIC_VERSION", "app"]
 
 
 @app.command()
@@ -52,17 +61,18 @@ def compile(
         typer.Option(help="Print prompt/output content and secrets instead of redacting them."),
     ] = False,
 ) -> None:
-    loaded_contract = load_contract(contract)
-    payload: dict[str, Any] = {}
-    if base_payload:
-        payload = json.loads(base_payload.read_text())
-    compiled = compile_request(
-        provider=provider,
-        messages=payload.pop("messages", []),
-        contract=loaded_contract,
-        mode=mode,
-        base_payload=payload,
-    )
+    loaded_contract = _load_contract_or_fail(contract)
+    payload = _load_base_payload(base_payload)
+    try:
+        compiled = compile_request(
+            provider=provider,
+            messages=payload.pop("messages", []),
+            contract=loaded_contract,
+            mode=mode,
+            base_payload=payload,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(
         json.dumps(
             {
@@ -83,20 +93,25 @@ def compile(
 @app.command()
 def validate(
     contract: Annotated[Path, typer.Option(help="YAML contract file.")],
-    input: Annotated[Path, typer.Option(help="Text file containing model output.")],
+    input: Annotated[
+        str,
+        typer.Option(help="Text file containing model output, or - to read from stdin."),
+    ],
     show_sensitive: Annotated[
         bool,
         typer.Option(help="Print parsed model output instead of redacting it."),
     ] = False,
 ) -> None:
-    loaded_contract = load_contract(contract)
-    result = validate_output(input.read_text(), loaded_contract)
+    loaded_contract = _load_contract_or_fail(contract)
+    output_text = _read_text_source(input, source_name="--input")
+    result = validate_output(output_text, loaded_contract)
+    redacted_parsed = REDACTED if result.parsed is not None else None
     typer.echo(
         json.dumps(
             {
                 "ok": result.ok,
                 "issues": [_issue_to_dict(issue) for issue in result.issues],
-                "parsed": result.parsed if show_sensitive else REDACTED if result.parsed else None,
+                "parsed": result.parsed if show_sensitive else redacted_parsed,
                 "redacted": not show_sensitive,
             },
             ensure_ascii=False,
@@ -124,7 +139,9 @@ def chat(
     prompt: Annotated[str | None, typer.Option(help="Single user prompt text.")] = None,
     messages: Annotated[
         str | None,
-        typer.Option(help="JSON messages array or path to a JSON file with messages."),
+        typer.Option(
+            help="JSON messages array, path to a JSON file, or - to read JSON from stdin."
+        ),
     ] = None,
     api_key_env: Annotated[
         str | None,
@@ -143,7 +160,7 @@ def chat(
     if max_retries < 0:
         raise typer.BadParameter("--max-retries must be greater than or equal to 0.")
 
-    loaded_contract = load_contract(contract)
+    loaded_contract = _load_contract_or_fail(contract)
     chat_messages = _resolve_chat_messages(prompt=prompt, messages=messages)
     api_key = _api_key_from_env(api_key_env)
 
@@ -191,6 +208,13 @@ def proxy(
         bool,
         typer.Option(help="Return raw provider error bodies. Disabled by default to avoid leaks."),
     ] = False,
+    violation_status: Annotated[
+        int | None,
+        typer.Option(
+            help="HTTP status to return when output fails the contract. "
+            "Default returns 200 with an output_contract field."
+        ),
+    ] = None,
 ) -> None:
     try:
         import uvicorn
@@ -199,17 +223,18 @@ def proxy(
     except ImportError as exc:
         raise typer.BadParameter("Install with the 'service' extra to run the proxy.") from exc
 
-    default_contract = load_contract(contract) if contract else None
-    uvicorn.run(
-        create_app(
+    default_contract = _load_contract_or_fail(contract) if contract else None
+    try:
+        service = create_app(
             provider=provider,
             base_url=base_url,
             default_contract=default_contract,
             include_provider_error_body=include_provider_error_body,
-        ),
-        host=host,
-        port=port,
-    )
+            violation_status_code=violation_status,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    uvicorn.run(service, host=host, port=port)
 
 
 def _normalize_chat_provider(provider: str) -> str:
@@ -256,6 +281,13 @@ def _resolve_chat_messages(
 
 
 def _load_messages_data(raw: str) -> Any:
+    if raw == "-":
+        text = sys.stdin.read()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"--messages stdin is not valid JSON: {exc.msg}.") from exc
+
     stripped = raw.lstrip()
     if stripped.startswith("[") or stripped.startswith("{"):
         try:
@@ -280,6 +312,48 @@ def _api_key_from_env(api_key_env: str | None) -> str | None:
     if not api_key:
         raise typer.BadParameter(f"Environment variable {api_key_env!r} is not set.")
     return api_key
+
+
+def _load_contract_or_fail(contract: Path) -> OutputContract:
+    try:
+        return load_contract(contract)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(f"Contract file not found: {contract}.") from exc
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not read contract file {contract}: {exc}.") from exc
+    except yaml.YAMLError as exc:
+        raise typer.BadParameter(f"Contract file is not valid YAML: {contract}.") from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _load_base_payload(base_payload: Path | None) -> dict[str, Any]:
+    if base_payload is None:
+        return {}
+    try:
+        text = base_payload.read_text()
+    except OSError as exc:
+        message = f"Could not read --base-payload file {base_payload}: {exc}."
+        raise typer.BadParameter(message) from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--base-payload is not valid JSON: {exc.msg}.") from exc
+    if not isinstance(data, dict):
+        raise typer.BadParameter("--base-payload must contain a JSON object.")
+    return data
+
+
+def _read_text_source(value: str, *, source_name: str) -> str:
+    if value == "-":
+        return sys.stdin.read()
+    path = Path(value)
+    try:
+        return path.read_text()
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(f"{source_name} file not found: {value}.") from exc
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not read {source_name} file {value}: {exc}.") from exc
 
 
 def _validation_summary(result: ValidationResult) -> dict[str, Any]:

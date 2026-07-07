@@ -69,7 +69,7 @@ class LangFence:
         profile: str | None = None,
         transport: str | None = None,
         max_retries: int = 0,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         timeout: float | httpx.Timeout | None = 60.0,
         api_key: str | None = None,
         headers: Mapping[str, str] | None = None,

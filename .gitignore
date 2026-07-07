@@ -29,7 +29,6 @@ tmp/
 *.tokens
 *.env
 .env*
-!.env.example
 .pypirc
 llm.yaml
 llm.yml

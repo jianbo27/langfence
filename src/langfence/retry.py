@@ -30,8 +30,6 @@ def decide_next_step(
     if not language_issues or len(language_issues) != len(errors):
         return PolicyDecision("fail", "Output violates the format contract.")
 
-    if language_policy.action == "warn":
-        return PolicyDecision("warn", "Output violates language policy.")
     if language_policy.action == "retry":
         return PolicyDecision("retry", "Output violates language policy.")
     if language_policy.action == "repair":

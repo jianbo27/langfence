@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
@@ -20,9 +21,16 @@ from langfence.validation import (
 ClientProfile: TypeAlias = Literal["vllm", "sglang", "openai", "litellm", "anthropic"]
 ClientTransport: TypeAlias = Literal["openai", "anthropic"]
 
+ANTHROPIC_VERSION = "2023-06-01"
+
 _OPENAI_ENDPOINT = "/chat/completions"
 _ANTHROPIC_ENDPOINT = "/messages"
 _SYSTEM_ROLES = {"system", "developer"}
+_ANTHROPIC_DEFAULT_MAX_TOKENS = 1024
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 502, 503, 504})
+_RETRY_BASE_DELAY = 0.5
+_RETRY_MAX_DELAY = 8.0
+_RETRY_AFTER_CAP = 30.0
 
 
 @dataclass(frozen=True)
@@ -54,10 +62,12 @@ class LangFenceHTTPError(LangFenceClientError):
         status_code: int,
         *,
         error_body: str | None = None,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(f"Provider returned HTTP status {status_code}.")
         self.status_code = status_code
         self.error_body = error_body
+        self.retry_after = retry_after
 
 
 class LangFenceResponseError(LangFenceClientError):
@@ -71,6 +81,16 @@ class _CompiledClientRequest:
 
 
 class LangFenceClient:
+    """Synchronous chat client that compiles, sends, and validates output contracts.
+
+    ``max_retries`` is a shared budget for validation-driven retries and
+    retryable transport failures (HTTP 408/429/502/503/504 and network errors).
+    ``max_tokens`` is only sent when set explicitly; the Anthropic transport,
+    which requires the field, falls back to 1024. ``timeout`` is ignored when a
+    pre-configured ``client`` is supplied — configure the timeout on that
+    client instead.
+    """
+
     def __init__(
         self,
         *,
@@ -81,7 +101,7 @@ class LangFenceClient:
         profile: str | None = None,
         transport: str | None = None,
         max_retries: int = 0,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         timeout: float | httpx.Timeout | None = 60.0,
         api_key: str | None = None,
         headers: Mapping[str, str] | None = None,
@@ -128,15 +148,40 @@ class LangFenceClient:
         messages: Sequence[Mapping[str, Any]],
         **request_options: Any,
     ) -> ChatResult:
+        if request_options.get("stream"):
+            raise ValueError(
+                "LangFenceClient does not support streaming responses (stream=True); "
+                "validation needs the complete output."
+            )
+
         warnings: list[str] = []
         repair_instructions: list[str] = []
         attempts_allowed = self.max_retries + 1
         last_result: ChatResult | None = None
 
+        if self._provider_enforced_format():
+            warnings.append(
+                "Grammar/structural-tag constraints are enforced by the provider's constrained "
+                "decoding and are not re-validated locally."
+            )
+
         for attempt in range(1, attempts_allowed + 1):
             compiled = self._compile(messages, request_options, repair_instructions)
             warnings.extend(compiled.warnings)
-            response_data = self._post(compiled.payload)
+            try:
+                response_data = self._post(compiled.payload)
+            except LangFenceHTTPError as exc:
+                if attempt < attempts_allowed and exc.status_code in _RETRYABLE_STATUS_CODES:
+                    _sleep_before_retry(attempt, exc.retry_after)
+                    continue
+                raise
+            except LangFenceClientError as exc:
+                if attempt < attempts_allowed and isinstance(
+                    exc.__cause__, httpx.TransportError
+                ):
+                    _sleep_before_retry(attempt, None)
+                    continue
+                raise
             raw_text = self._extract_text(response_data)
             validation = self._validate(raw_text)
             last_result = ChatResult(
@@ -150,6 +195,11 @@ class LangFenceClient:
             )
 
             if validation.ok:
+                return last_result
+
+            # Re-prompting cannot fix issues the local validator is unable to
+            # check at all; return immediately instead of burning retries.
+            if _has_unfixable_errors(validation):
                 return last_result
 
             decision = decide_next_step(validation, self.contract.language)
@@ -185,11 +235,19 @@ class LangFenceClient:
             return self._compile_anthropic_transport(messages, request_options, repair_instructions)
         raise ValueError(f"Unsupported transport: {self.transport}")
 
-    def _validate(self, text: str) -> ValidationResult:
-        if self.profile in {"vllm", "sglang"} and isinstance(
+    def _provider_enforced_format(self) -> bool:
+        """True when the engine's constrained decoding enforces the format.
+
+        Only vLLM/SGLang receive grammar/structural-tag request fields, and
+        those constraints cannot be re-checked locally.
+        """
+        return self.profile in {"vllm", "sglang"} and isinstance(
             self.contract.format,
             GrammarConstraint | StructuralTagConstraint,
-        ):
+        )
+
+    def _validate(self, text: str) -> ValidationResult:
+        if self._provider_enforced_format():
             return validate_provider_enforced_output(text, self.contract)
         return validate_output(text, self.contract)
 
@@ -201,6 +259,8 @@ class LangFenceClient:
     ) -> _CompiledClientRequest:
         base_payload = dict(request_options)
         base_payload.setdefault("model", self.model)
+        if self.max_tokens is not None:
+            base_payload.setdefault("max_tokens", self.max_tokens)
 
         provider: str
         if self.profile in {"vllm", "sglang"}:
@@ -231,7 +291,10 @@ class LangFenceClient:
     ) -> _CompiledClientRequest:
         base_payload = dict(request_options)
         base_payload.setdefault("model", self.model)
-        base_payload.setdefault("max_tokens", self.max_tokens)
+        base_payload.setdefault(
+            "max_tokens",
+            self.max_tokens if self.max_tokens is not None else _ANTHROPIC_DEFAULT_MAX_TOKENS,
+        )
 
         compiled = compile_request(
             "anthropic-compatible",
@@ -247,10 +310,21 @@ class LangFenceClient:
         return _CompiledClientRequest(payload=payload, warnings=compiled.warnings)
 
     def _post(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        body = dict(payload)
+        # Adapters emit constraint fields under "extra_body" so compiled
+        # payloads stay compatible with the OpenAI Python SDK, which merges
+        # that key client-side. This client sends raw JSON, so merge it here —
+        # otherwise engines silently ignore the unknown "extra_body" key and
+        # the constraint never reaches constrained decoding.
+        extra_body = body.pop("extra_body", None)
+        if isinstance(extra_body, Mapping):
+            for key, value in extra_body.items():
+                body.setdefault(str(key), value)
+
         try:
             response = self._client.post(
                 self.base_url + _endpoint_for_transport(self.transport),
-                json=payload,
+                json=body,
                 headers=self._request_headers(),
             )
         except httpx.HTTPError as exc:
@@ -259,6 +333,7 @@ class LangFenceClient:
             raise LangFenceHTTPError(
                 response.status_code,
                 error_body=response.text if self.include_error_body else None,
+                retry_after=_parse_retry_after(response.headers.get("retry-after")),
             )
 
         try:
@@ -277,7 +352,7 @@ class LangFenceClient:
             else:
                 headers.setdefault("Authorization", f"Bearer {self.api_key}")
         if self.transport == "anthropic":
-            headers.setdefault("anthropic-version", "2023-06-01")
+            headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
         return headers
 
     def _extract_text(self, response_data: Mapping[str, Any]) -> str:
@@ -384,6 +459,31 @@ def _repair_instruction(issues: Sequence[ValidationIssue]) -> str:
 def _has_only_language_errors(validation: ValidationResult) -> bool:
     errors = validation.errors
     return bool(errors) and all(issue.code.startswith("language.") for issue in errors)
+
+
+def _has_unfixable_errors(validation: ValidationResult) -> bool:
+    return any(issue.code.endswith(".validation_unavailable") for issue in validation.errors)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return seconds
+
+
+def _sleep_before_retry(attempt: int, retry_after: float | None) -> None:
+    if retry_after is not None:
+        delay = min(retry_after, _RETRY_AFTER_CAP)
+    else:
+        delay = min(_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _RETRY_MAX_DELAY)
+    if delay > 0:
+        time.sleep(delay)
 
 
 def _extract_openai_text(response_data: Mapping[str, Any]) -> str:

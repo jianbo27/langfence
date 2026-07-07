@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from langfence.adapters import compile_request
+from langfence.adapters import _normalize_provider, compile_request
+from langfence.clients.http import LangFenceResponseError, _extract_openai_text
 from langfence.constraints import GrammarConstraint, StructuralTagConstraint
 from langfence.contracts import OutputContract
 from langfence.privacy import REDACTED, redact_for_display
@@ -27,8 +30,18 @@ def create_app(
     base_url: str,
     default_contract: OutputContract | None = None,
     include_provider_error_body: bool = False,
+    violation_status_code: int | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="LangFence proxy", version=_package_version())
+    provider_value = _normalize_provider(provider).value
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            app.state.http_client = client
+            yield
+
+    app = FastAPI(title="LangFence proxy", version=_package_version(), lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -36,14 +49,17 @@ def create_app(
 
     @app.post("/compile")
     async def compile_endpoint(body: CompileRequestBody) -> dict[str, Any]:
-        contract = contract_from_dict(body.contract)
-        compiled = compile_request(
-            provider=body.provider,
-            messages=body.messages,
-            contract=contract,
-            mode=body.mode,
-            base_payload=body.base_payload,
-        )
+        try:
+            contract = contract_from_dict(body.contract)
+            compiled = compile_request(
+                provider=body.provider,
+                messages=body.messages,
+                contract=contract,
+                mode=body.mode,
+                base_payload=body.base_payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "provider": compiled.provider.value,
             "mode": compiled.mode.value,
@@ -54,7 +70,11 @@ def create_app(
 
     @app.post("/validate")
     async def validate_endpoint(body: ValidateRequestBody) -> dict[str, Any]:
-        result = validate_output(body.output, contract_from_dict(body.contract))
+        try:
+            contract = contract_from_dict(body.contract)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = validate_output(body.output, contract)
         payload = _validation_payload(result.issues, result.ok)
         payload["parsed"] = REDACTED if body.redact and result.parsed is not None else result.parsed
         payload["redacted"] = body.redact
@@ -64,13 +84,18 @@ def create_app(
     async def chat_completions(
         request: Request,
         authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
+    ) -> Any:
         try:
             body = await request.json()
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+        if body.get("stream"):
+            raise HTTPException(
+                status_code=400,
+                detail="Streaming is not supported by the LangFence proxy.",
+            )
 
         contract = _extract_contract(body, default_contract)
         if contract is None:
@@ -82,23 +107,25 @@ def create_app(
 
         messages = body.pop("messages", [])
         body.pop("x-output-contract", None)
-        compiled = compile_request(
-            provider=provider,
-            messages=messages,
-            contract=contract,
-            base_payload=body,
-        )
+        try:
+            compiled = compile_request(
+                provider=provider_value,
+                messages=messages,
+                contract=contract,
+                base_payload=body,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         headers = {}
         if authorization:
             headers["Authorization"] = authorization
 
-        timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                base_url.rstrip("/") + "/chat/completions",
-                json=compiled.payload,
-                headers=headers,
-            )
+        client: httpx.AsyncClient = request.app.state.http_client
+        response = await client.post(
+            base_url.rstrip("/") + "/chat/completions",
+            json=compiled.payload,
+            headers=headers,
+        )
         if response.status_code >= 400:
             detail: dict[str, Any] = {
                 "message": "Provider returned an error.",
@@ -118,9 +145,18 @@ def create_app(
         if not isinstance(response_data, dict):
             raise HTTPException(status_code=502, detail="Provider returned a non-object JSON body")
         data: dict[str, Any] = response_data
-        text = _extract_openai_text(data)
-        validation = _validate_provider_output(provider, text, contract)
-        data["output_contract"] = _validation_payload(validation.issues, validation.ok)
+        try:
+            text = _extract_openai_text(data)
+        except LangFenceResponseError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Provider response is missing message content.",
+            ) from exc
+        validation = _validate_provider_output(provider_value, text, contract)
+        contract_payload = _validation_payload(validation.issues, validation.ok)
+        if violation_status_code is not None and not validation.ok:
+            raise HTTPException(status_code=violation_status_code, detail=contract_payload)
+        data["output_contract"] = contract_payload
         return data
 
     return app
@@ -130,23 +166,18 @@ def _extract_contract(
     body: dict[str, Any],
     default_contract: OutputContract | None,
 ) -> OutputContract | None:
-    contract_data = body.get("x-output-contract")
-    if isinstance(contract_data, dict):
-        return contract_from_dict(contract_data)
-    return default_contract
-
-
-def _extract_openai_text(data: dict[str, Any]) -> str:
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
+    if "x-output-contract" not in body:
+        return default_contract
+    contract_data = body["x-output-contract"]
+    if not isinstance(contract_data, dict):
         raise HTTPException(
-            status_code=502,
-            detail="Provider response is missing message content.",
-        ) from exc
-    if isinstance(content, str):
-        return content
-    raise HTTPException(status_code=502, detail="Provider response content must be a string.")
+            status_code=400,
+            detail="x-output-contract must be a JSON object.",
+        )
+    try:
+        return contract_from_dict(contract_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _validation_payload(issues: tuple[ValidationIssue, ...], ok: bool) -> dict[str, Any]:

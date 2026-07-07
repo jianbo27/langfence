@@ -147,6 +147,26 @@ pip install "langfence[service]"
 langfence proxy --provider vllm --base-url http://localhost:8000/v1
 ```
 
+## Proxy Service
+
+The optional proxy is a thin OpenAI-compatible sidecar. It compiles the contract into
+the upstream request, forwards to the configured provider, and validates the returned
+text before responding.
+
+- `POST /v1/chat/completions` proxies a chat request. Pass a per-request contract as an
+  `x-output-contract` object in the request body, or start the proxy with `--contract`
+  for a default. By default a contract violation still returns HTTP 200 with the parsed
+  provider response plus an added `output_contract` field (`{"ok": ..., "issues": [...]}`),
+  so vanilla OpenAI SDK callers keep working. Pass `--violation-status 422` (any status)
+  to instead fail the request with that status and a body carrying the validation issues.
+- `POST /compile` returns the compiled provider payload for a contract.
+- `POST /validate` validates saved output text against a contract.
+- `GET /healthz` returns `{"status": "ok"}`.
+
+Streaming is not supported: a request with `stream: true` is rejected with HTTP 400,
+because validation needs the complete output. Raw provider error bodies are hidden by
+default; pass `--include-provider-error-body` to surface them in a trusted environment.
+
 ## Provider Behavior
 
 | Provider | Format handling | Language handling |
@@ -166,6 +186,35 @@ local reasoning model returns a leading visible block such as `<think>...</think
 LangFence strips that block before validation by default and checks the final answer.
 This keeps reasoning-model output quality intact: no extra constrained decoding or
 prompt pressure is added just to control the language of private reasoning.
+
+## Language Policy
+
+`LanguagePolicy` chooses a language detector with the `detector` field:
+
+- `detector="heuristic"` (default) uses the built-in, dependency-free detector.
+- `detector="lingua"` uses `lingua-language-detector` and raises at construction if that
+  optional dependency is not installed. Install it with `pip install "langfence[language]"`.
+- `detector="auto"` uses lingua when it is available and falls back to the heuristic
+  detector otherwise.
+
+Two thresholds are checked independently:
+
+- `min_confidence` (default 0.75) is the minimum confidence for the detected primary
+  language of the output.
+- `exclude_threshold` (default 0.20) is the minimum confidence at which an excluded
+  language is treated as present.
+
+## Client Behavior
+
+`LangFenceClient` handles retries, extraction, and validation:
+
+- `max_tokens` is only sent when you set it explicitly. The Anthropic transport, which
+  requires the field, falls back to 1024.
+- `max_retries` is a shared budget covering both validation-driven retries and retryable
+  transport failures (HTTP 408/429/502/503/504 and network errors), using exponential
+  backoff between attempts.
+- Streaming is not supported: passing `stream=True` raises `ValueError`, because
+  validation needs the complete output.
 
 ## Development
 

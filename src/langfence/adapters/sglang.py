@@ -67,6 +67,7 @@ def _compile_openai(
         _ensure_extra_body(payload)["regex"] = choices_to_regex(constraint.choices)
         warnings.append("SGLang has no stable OpenAI choice field; compiled choices to regex.")
     elif isinstance(constraint, GrammarConstraint):
+        _require_ebnf(constraint)
         _ensure_extra_body(payload)["ebnf"] = constraint.grammar
     elif isinstance(constraint, StructuralTagConstraint):
         payload["response_format"] = {"type": "structural_tag", **constraint.spec}
@@ -92,6 +93,7 @@ def _compile_native(
         sampling_params["regex"] = choices_to_regex(constraint.choices)
         warnings.append("SGLang has no stable native choice field; compiled choices to regex.")
     elif isinstance(constraint, GrammarConstraint):
+        _require_ebnf(constraint)
         sampling_params["ebnf"] = constraint.grammar
     elif isinstance(constraint, StructuralTagConstraint):
         sampling_params["structural_tag"] = json.dumps(constraint.spec)
@@ -106,7 +108,17 @@ def _ensure_extra_body(payload: dict[str, Any]) -> dict[str, Any]:
     return extra_body
 
 
+def _require_ebnf(constraint: GrammarConstraint) -> None:
+    if constraint.syntax != "ebnf":
+        raise ValueError(
+            f"SGLang supports only EBNF grammars; got syntax={constraint.syntax!r}. "
+            "Convert the grammar to EBNF or target a provider that supports it."
+        )
+
+
 def choices_to_regex(choices: tuple[str, ...]) -> str:
     if not choices:
         raise ValueError("ChoiceConstraint requires at least one choice")
-    return "^(?:" + "|".join(re.escape(choice) for choice in choices) + ")$"
+    # Constrained-decoding regex backends match the full output implicitly and
+    # several reject ^/$ anchors, so emit an unanchored alternation.
+    return "(?:" + "|".join(re.escape(choice) for choice in choices) + ")"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langfence.adapters.base import add_language_instruction, clone_payload
@@ -63,7 +64,9 @@ def _compile_openai(
 
     if isinstance(constraint, StructuralTagConstraint):
         structured_outputs = _ensure_structured_outputs(payload)
-        structured_outputs["structural_tag"] = constraint.spec
+        # vLLM's StructuredOutputsParams.structural_tag expects a JSON-encoded
+        # string, not a mapping.
+        structured_outputs["structural_tag"] = json.dumps(constraint.spec)
         return
 
     structured_outputs = _ensure_structured_outputs(payload)
@@ -91,7 +94,7 @@ def _compile_native(payload: dict[str, Any], contract: OutputContract) -> None:
     elif isinstance(constraint, GrammarConstraint):
         structured_outputs["grammar"] = constraint.grammar
     elif isinstance(constraint, StructuralTagConstraint):
-        structured_outputs["structural_tag"] = constraint.spec
+        structured_outputs["structural_tag"] = json.dumps(constraint.spec)
     else:
         raise TypeError(f"Unsupported vLLM constraint: {constraint!r}")
 

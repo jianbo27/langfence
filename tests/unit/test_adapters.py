@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from langfence import (
@@ -61,7 +63,8 @@ def test_vllm_structural_tag_openai_uses_structured_outputs() -> None:
         OutputContract(format=StructuralTagConstraint(spec=spec)),
     )
 
-    assert compiled.payload["extra_body"]["structured_outputs"]["structural_tag"] == spec
+    tag = compiled.payload["extra_body"]["structured_outputs"]["structural_tag"]
+    assert json.loads(tag) == spec
     assert "response_format" not in compiled.payload
 
 
@@ -93,7 +96,7 @@ def test_sglang_choice_falls_back_to_regex() -> None:
         OutputContract(format=ChoiceConstraint(["yes", "no"])),
     )
 
-    assert compiled.payload["extra_body"]["regex"] == "^(?:yes|no)$"
+    assert compiled.payload["extra_body"]["regex"] == "(?:yes|no)"
     assert "compiled choices to regex" in compiled.warnings[0]
 
 

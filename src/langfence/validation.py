@@ -17,9 +17,13 @@ from langfence.constraints import (
     StructuralTagConstraint,
 )
 from langfence.contracts import OutputContract
-from langfence.language import detect_language
+from langfence.language import LanguageDetection, LanguagePolicy, detect_language
 
 IssueSeverity = Literal["warning", "error"]
+
+_FENCED_CODE_RE = re.compile(r"```.*?(?:```|\Z)", flags=re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_URL_RE = re.compile(r"https?://\S+")
 
 _VISIBLE_REASONING_BLOCK_RE = re.compile(
     r"\A\s*(?:"
@@ -202,7 +206,7 @@ def _validate_language(
     if policy is None:
         return
 
-    language_text = _language_detection_text(text, parsed)
+    language_text = _strip_non_language_content(_language_detection_text(text, parsed))
     detection = detect_language(language_text, detector=policy.detector)
     severity: IssueSeverity = "warning" if policy.action == "warn" else "error"
     metadata = {
@@ -223,16 +227,20 @@ def _validate_language(
         )
 
     if policy.include and detection.language not in policy.include:
+        # A low-signal detection (numeric/symbolic output, or below the
+        # confidence floor) is not evidence of a violation; do not hard-fail
+        # or burn the retry budget on it.
+        low_signal = detection.language == "unknown" or detection.confidence < policy.min_confidence
         issues.append(
             ValidationIssue(
                 code="language.not_included",
                 message="Detected language is not in the allowed language set.",
-                severity=severity,
+                severity="warning" if low_signal else severity,
                 metadata={**metadata, "include": list(policy.include)},
             )
         )
 
-    excluded_language = _matched_excluded_language(detection, policy.exclude, policy.min_confidence)
+    excluded_language = _matched_excluded_language(detection, policy)
     if excluded_language is not None:
         issues.append(
             ValidationIssue(
@@ -250,20 +258,29 @@ def _validate_language(
 
 
 def _matched_excluded_language(
-    detection: Any,
-    excluded: tuple[str, ...],
-    min_confidence: float,
+    detection: LanguageDetection,
+    policy: LanguagePolicy,
 ) -> str | None:
-    if not excluded:
+    if not policy.exclude:
         return None
-    if detection.language in excluded:
-        return str(detection.language)
+    if detection.language in policy.exclude and detection.confidence >= policy.exclude_threshold:
+        return detection.language
 
-    threshold = min(min_confidence, 0.20)
-    for language in excluded:
-        if detection.metadata.get(language, 0.0) >= threshold:
+    for language in policy.exclude:
+        if detection.metadata.get(language, 0.0) >= policy.exclude_threshold:
             return language
     return None
+
+
+def _strip_non_language_content(text: str) -> str:
+    """Drop code blocks and URLs before language detection.
+
+    ASCII identifiers in code samples would otherwise count as Latin text and
+    trip exclude-English policies on legitimate CJK answers.
+    """
+    stripped = _FENCED_CODE_RE.sub(" ", text)
+    stripped = _INLINE_CODE_RE.sub(" ", stripped)
+    return _URL_RE.sub(" ", stripped)
 
 
 def _language_detection_text(text: str, parsed: Any | None) -> str:
@@ -323,7 +340,10 @@ def _cached_jsonschema_validator(schema_key: str) -> Draft202012Validator:
 
 @lru_cache(maxsize=512)
 def _compiled_regex(pattern: str) -> re.Pattern[str]:
-    return re.compile(pattern, flags=re.DOTALL)
+    # No implicit flags: engine-side constrained decoding (vLLM/SGLang) compiles
+    # the same pattern without DOTALL, and local validation must agree with it.
+    # Users can opt in with an inline (?s) flag.
+    return re.compile(pattern)
 
 
 def _jsonschema_error_key(error: ValidationError) -> str:
@@ -332,9 +352,24 @@ def _jsonschema_error_key(error: ValidationError) -> str:
 
 def _jsonschema_issue(error: ValidationError) -> ValidationIssue:
     path = ".".join(str(part) for part in error.absolute_path) or "$"
+    # error.message embeds the offending output value; issue messages must not
+    # leak output content, so describe the violated schema rule instead.
     return ValidationIssue(
         code="json_schema.invalid",
-        message=f"Output failed JSON Schema validation at {path}.",
+        message=(
+            f"Output failed JSON Schema validation at {path}: "
+            f"violates the {error.validator!r} rule."
+        ),
         path=path,
-        metadata={"validator": error.validator},
+        metadata={
+            "validator": error.validator,
+            "validator_value": _truncated_repr(error.validator_value),
+        },
     )
+
+
+def _truncated_repr(value: Any, limit: int = 120) -> str:
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."

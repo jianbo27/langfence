@@ -15,11 +15,11 @@ OpenAI-compatible serving fields are not fully portable across providers.
 
 | Capability | vLLM | SGLang | OpenAI-compatible / LiteLLM | Anthropic-compatible |
 | --- | --- | --- | --- | --- |
-| JSON schema | `response_format.type=json_schema` or `extra_body.structured_outputs.json` | `response_format.type=json_schema` | standard `response_format.type=json_schema` | system instruction + validation |
+| JSON schema | `response_format` (type json_schema) | `response_format.type=json_schema` | standard `response_format.type=json_schema` | system instruction + validation |
 | Regex | `extra_body.structured_outputs.regex` | `extra_body.regex` | system instruction + validation | system instruction + validation |
 | Choice | `extra_body.structured_outputs.choice` | compiled to regex | system instruction + validation | system instruction + validation |
 | Grammar | `extra_body.structured_outputs.grammar` | `extra_body.ebnf` | system instruction + validation | system instruction + validation |
-| Structural tag | `response_format.type=structural_tag` | `response_format.type=structural_tag` | system instruction + validation | system instruction + validation |
+| Structural tag | `extra_body.structured_outputs.structural_tag` (JSON-encoded string) | `response_format.type=structural_tag` | system instruction + validation | system instruction + validation |
 
 Native/offline fields also differ. vLLM uses `SamplingParams(structured_outputs=...)`;
 SGLang uses sampling params such as `json_schema`, `regex`, `ebnf`, and `structural_tag`.
