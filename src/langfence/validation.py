@@ -45,8 +45,12 @@ class ValidationIssue:
 class ValidationResult:
     ok: bool
     issues: tuple[ValidationIssue, ...] = ()
-    parsed: Any | None = None
-    text: str = ""
+    parsed: Any | None = field(default=None, repr=False)
+    text: str = field(default="", repr=False)
+
+    @property
+    def valid(self) -> bool:
+        return self.ok
 
     @property
     def errors(self) -> tuple[ValidationIssue, ...]:

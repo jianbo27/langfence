@@ -39,3 +39,37 @@ def test_redacts_secret_keys() -> None:
 
     assert redacted["Authorization"] == REDACTED
     assert redacted["nested"]["api_key"] == REDACTED
+
+
+def test_redacts_openai_response_content() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "private answer",
+                }
+            }
+        ]
+    }
+
+    redacted = redact_for_display(payload)
+
+    assert redacted["choices"][0]["message"]["content"] == REDACTED
+
+
+def test_redacts_anthropic_response_text() -> None:
+    payload = {
+        "response": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "private answer",
+                }
+            ]
+        }
+    }
+
+    redacted = redact_for_display(payload)
+
+    assert redacted["response"]["content"] == REDACTED

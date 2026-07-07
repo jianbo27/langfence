@@ -12,7 +12,6 @@ import typer
 
 from langfence.adapters import compile_request
 from langfence.clients import LangFenceClient, LangFenceClientError, LangFenceHTTPError
-from langfence.contracts import RequestMode
 from langfence.privacy import REDACTED, redact_for_display
 from langfence.serialization import load_contract
 from langfence.validation import ValidationIssue, ValidationResult, validate_output
@@ -40,9 +39,10 @@ def compile(
         ),
     ],
     contract: Annotated[Path, typer.Option(help="YAML contract file.")],
-    mode: Annotated[str, typer.Option(help="Request mode: openai, anthropic, or native.")] = (
-        "openai"
-    ),
+    mode: Annotated[
+        str | None,
+        typer.Option(help="Request mode override: openai, anthropic, or native."),
+    ] = None,
     base_payload: Annotated[
         Path | None,
         typer.Option(help="Optional JSON file with an existing request payload."),
@@ -60,7 +60,7 @@ def compile(
         provider=provider,
         messages=payload.pop("messages", []),
         contract=loaded_contract,
-        mode=RequestMode(mode),
+        mode=mode,
         base_payload=payload,
     )
     typer.echo(

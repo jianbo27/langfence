@@ -19,10 +19,12 @@ if TYPE_CHECKING:
         LangFenceHTTPError,
         LangFenceResponseError,
     )
+    from langfence.fence import LangFence
     from langfence.validation import ValidationIssue, ValidationResult, validate_output
 
 _LAZY_EXPORTS = {
     "ChatResult",
+    "LangFence",
     "LangFenceClient",
     "LangFenceClientError",
     "LangFenceHTTPError",
@@ -39,6 +41,7 @@ __all__ = [
     "CompiledRequest",
     "GrammarConstraint",
     "JsonSchemaConstraint",
+    "LangFence",
     "LangFenceClient",
     "LangFenceClientError",
     "LangFenceHTTPError",
@@ -59,6 +62,12 @@ __all__ = [
 def __getattr__(name: str) -> Any:
     if name not in _LAZY_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    if name == "LangFence":
+        from langfence.fence import LangFence
+
+        globals()[name] = LangFence
+        return LangFence
 
     if name == "compile_request":
         from langfence.adapters import compile_request

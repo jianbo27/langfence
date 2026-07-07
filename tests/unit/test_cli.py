@@ -47,6 +47,33 @@ class MockClient:
         return MockResponse(self.responses.pop(0))
 
 
+def test_compile_anthropic_compatible_defaults_to_messages_mode(tmp_path: Path) -> None:
+    contract = tmp_path / "contract.yaml"
+    contract.write_text(
+        """
+format:
+  type: regex
+  pattern: "^ok$"
+"""
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "compile",
+            "--provider",
+            "anthropic-compatible",
+            "--contract",
+            str(contract),
+        ],
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert output["mode"] == "anthropic"
+    assert "messages" in output["payload"]
+
+
 def test_chat_openai_defaults_to_validation_summary_without_text(
     tmp_path: Path,
     monkeypatch: Any,

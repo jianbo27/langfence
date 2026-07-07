@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import httpx
@@ -27,7 +28,7 @@ def create_app(
     default_contract: OutputContract | None = None,
     include_provider_error_body: bool = False,
 ) -> FastAPI:
-    app = FastAPI(title="LangFence proxy", version="0.1.1")
+    app = FastAPI(title="LangFence proxy", version=_package_version())
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -173,3 +174,10 @@ def _validate_provider_output(
     ):
         return validate_provider_enforced_output(text, contract)
     return validate_output(text, contract)
+
+
+def _package_version() -> str:
+    try:
+        return version("langfence")
+    except PackageNotFoundError:
+        return "0.0.0"

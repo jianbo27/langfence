@@ -67,7 +67,7 @@ def compile_anthropic_request(
     provider: Provider,
     mode: RequestMode,
 ) -> CompiledRequest:
-    if mode not in {RequestMode.OPENAI, RequestMode.ANTHROPIC}:
+    if mode is not RequestMode.ANTHROPIC:
         raise ValueError(f"{provider.value} supports only anthropic request mode")
 
     compiled = clone_payload(payload)

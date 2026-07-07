@@ -4,6 +4,7 @@ from langfence import (
     OutputContract,
     compile_request,
 )
+from langfence.privacy import redact_for_display
 
 contract = OutputContract(
     format=JsonSchemaConstraint(
@@ -28,4 +29,4 @@ compiled = compile_request(
     base_payload={"model": "Qwen/Qwen3-8B", "temperature": 0},
 )
 
-print(compiled.payload)
+print(redact_for_display(compiled.payload))

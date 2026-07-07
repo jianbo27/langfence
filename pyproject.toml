@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langfence"
-version = "0.1.1"
+version = "0.1.2"
 description = "Output contracts and language policies for vLLM, SGLang, LiteLLM, and compatible LLM APIs."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -77,6 +77,14 @@ Issues = "https://github.com/jianbo27/langfence/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/langfence"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/langfence",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100

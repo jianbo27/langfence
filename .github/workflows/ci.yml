@@ -26,14 +26,28 @@ jobs:
       - name: Build artifacts
         run: |
           python -m pip install build twine
+          rm -rf dist build
           python -m build
           python -m twine check dist/*
-      - name: Verify wheel metadata
+      - name: Smoke test built wheel
         run: |
-          python -m pip install --force-reinstall dist/*.whl
-          python - <<'PY'
+          tmp="$(mktemp -d)"
+          python -m venv "$tmp/venv"
+          "$tmp/venv/bin/python" -m pip install --upgrade pip
+          "$tmp/venv/bin/python" -m pip install dist/*.whl
+          cd "$tmp"
+          "$tmp/venv/bin/python" - <<'PY'
           import importlib.metadata as metadata
 
+          import langfence
+          from langfence import LangFence, LanguagePolicy, compile_request, validate_output
+
+          fence = LangFence(language=LanguagePolicy(include=["en"], min_confidence=0.2))
+          assert fence.validate("hello").valid
+          assert compile_request is not None
+          assert validate_output is not None
           files = metadata.files("langfence") or ()
           assert any(str(path) == "langfence/py.typed" for path in files)
+          assert any(str(path) == "langfence/fence.py" for path in files)
           PY
+          "$tmp/venv/bin/langfence" --help >/dev/null

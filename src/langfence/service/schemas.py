@@ -14,7 +14,7 @@ class CompileRequestBody(BaseModel):
     provider: str
     messages: list[dict[str, Any]] | None = None
     contract: dict[str, Any]
-    mode: str = "openai"
+    mode: str | None = None
     base_payload: dict[str, Any] = Field(default_factory=dict)
     redact: bool = True
 

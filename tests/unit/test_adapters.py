@@ -1,3 +1,5 @@
+import pytest
+
 from langfence import (
     ChoiceConstraint,
     GrammarConstraint,
@@ -122,6 +124,13 @@ def test_openai_compatible_regex_uses_prompt_guidance_not_private_fields() -> No
     assert any("post-validation only" in warning for warning in compiled.warnings)
 
 
+@pytest.mark.parametrize("provider", [" openai_compatible ", "VLLM", "generic"])
+def test_compile_request_normalizes_provider_aliases(provider: str) -> None:
+    compiled = compile_request(provider, [], OutputContract(), base_payload={"model": "m"})
+
+    assert compiled.payload["model"] == "m"
+
+
 def test_litellm_json_schema_uses_standard_response_format() -> None:
     compiled = compile_request(
         "litellm",
@@ -135,7 +144,7 @@ def test_litellm_json_schema_uses_standard_response_format() -> None:
     assert "sampling_params" not in compiled.payload
 
 
-def test_anthropic_compatible_uses_messages_payload_and_system_guidance() -> None:
+def test_anthropic_compatible_defaults_to_messages_payload_and_system_guidance() -> None:
     compiled = compile_request(
         "anthropic-compatible",
         [
@@ -146,10 +155,10 @@ def test_anthropic_compatible_uses_messages_payload_and_system_guidance() -> Non
             format=RegexConstraint(r"ok|no"),
             language=LanguagePolicy(include=["en"], exclude=["zh"], min_confidence=0.2),
         ),
-        mode="anthropic",
         base_payload={"model": "claude-compatible"},
     )
 
+    assert compiled.mode.value == "anthropic"
     assert compiled.payload["model"] == "claude-compatible"
     assert compiled.payload["max_tokens"] == 1024
     assert compiled.payload["messages"] == [{"role": "user", "content": "hi"}]
@@ -158,3 +167,8 @@ def test_anthropic_compatible_uses_messages_payload_and_system_guidance() -> Non
     assert "Use only these natural languages: en." in compiled.payload["system"]
     assert "response_format" not in compiled.payload
     assert "extra_body" not in compiled.payload
+
+
+def test_anthropic_compatible_rejects_explicit_openai_mode() -> None:
+    with pytest.raises(ValueError, match="supports only anthropic request mode"):
+        compile_request("anthropic-compatible", [], OutputContract(), mode="openai")

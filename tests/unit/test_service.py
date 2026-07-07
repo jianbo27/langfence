@@ -100,6 +100,26 @@ def test_validate_redacts_parsed_output_by_default() -> None:
     assert response.json()["parsed"] == REDACTED
 
 
+def test_compile_endpoint_auto_selects_anthropic_mode() -> None:
+    client = TestClient(create_app(provider="vllm", base_url="https://provider.test/v1"))
+
+    response = client.post(
+        "/compile",
+        json={
+            "provider": "anthropic-compatible",
+            "messages": [{"role": "user", "content": "say ok"}],
+            "contract": {"format": {"kind": "regex", "pattern": "^ok$"}},
+            "base_payload": {"model": "claude-compatible"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "anthropic"
+    assert body["payload"]["model"] == "claude-compatible"
+    assert body["payload"]["messages"][0]["content"] == REDACTED
+
+
 def test_proxy_hides_provider_error_body_by_default(monkeypatch: Any) -> None:
     class MockAsyncClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:

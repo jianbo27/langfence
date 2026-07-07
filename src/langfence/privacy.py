@@ -61,8 +61,11 @@ def _is_prompt_value_key(key: str, path: tuple[str, ...]) -> bool:
     if "messages" in path:
         return True
 
+    if "message" in path or "choices" in path:
+        return True
+
     if not path:
         return True
 
     parent = path[-1]
-    return parent in {"request", "payload", "body"}
+    return parent in {"request", "payload", "body", "response"}

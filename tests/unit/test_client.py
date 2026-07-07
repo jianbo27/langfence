@@ -111,6 +111,26 @@ def test_openai_compatible_choice_uses_post_validation_without_private_fields() 
     assert result.text == "approved"
     assert "response_format" not in requests[0]
     assert "extra_body" not in requests[0]
+    assert result.raw_response is None
+    assert "approved" not in repr(result)
+
+
+def test_raw_response_requires_explicit_opt_in() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response("approved")
+
+    client = LangFenceClient(
+        provider="openai-compatible",
+        base_url="https://openai-compatible.test/v1",
+        model="model-a",
+        contract=OutputContract(format=ChoiceConstraint(["approved", "rejected"])),
+        include_raw_response=True,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.chat([{"role": "user", "content": "prompt"}])
+
+    assert result.raw_response == {"choices": [{"message": {"content": "approved"}}]}
 
 
 def test_anthropic_profile_uses_messages_transport_and_prompt_guidance() -> None:

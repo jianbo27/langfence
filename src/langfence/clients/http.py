@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 import httpx
@@ -27,13 +27,13 @@ _SYSTEM_ROLES = {"system", "developer"}
 
 @dataclass(frozen=True)
 class ChatResult:
-    text: str
-    validation: ValidationResult
+    text: str = field(repr=False)
+    validation: ValidationResult = field(repr=False)
     attempts: int
     profile: ClientProfile
     transport: ClientTransport
     warnings: tuple[str, ...] = ()
-    raw_response: dict[str, Any] | None = None
+    raw_response: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def parsed(self) -> Any | None:
@@ -87,6 +87,7 @@ class LangFenceClient:
         headers: Mapping[str, str] | None = None,
         client: httpx.Client | None = None,
         include_error_body: bool = False,
+        include_raw_response: bool = False,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be greater than or equal to 0")
@@ -108,6 +109,7 @@ class LangFenceClient:
         self.api_key = api_key
         self.headers = dict(headers or {})
         self.include_error_body = include_error_body
+        self.include_raw_response = include_raw_response
         self._client = client if client is not None else httpx.Client(timeout=timeout)
         self._owns_client = client is None
 
@@ -144,7 +146,7 @@ class LangFenceClient:
                 profile=self.profile,
                 transport=self.transport,
                 warnings=tuple(_unique(warnings)),
-                raw_response=response_data,
+                raw_response=response_data if self.include_raw_response else None,
             )
 
             if validation.ok:

@@ -32,6 +32,17 @@ pip install -e ".[dev,all]"
 
 ## Python API
 
+For most Python code, start with the `LangFence` facade:
+
+```python
+from langfence import LangFence, LanguagePolicy
+
+fence = LangFence(language=LanguagePolicy(include=["zh"], exclude=["en"], min_confidence=0.2))
+
+result = fence.validate("这是一个中文回答。")
+assert result.valid
+```
+
 Use `compile_request` when you only want the provider payload:
 
 ```python
@@ -62,16 +73,14 @@ Use `LangFenceClient` when you want request, retry, extraction, and validation i
 place:
 
 ```python
-from langfence import LangFenceClient, RegexConstraint, OutputContract
-import os
+from langfence import LangFence, RegexConstraint
 
-contract = OutputContract(format=RegexConstraint(r"^(approved|rejected)$"))
+fence = LangFence(format=RegexConstraint(r"^(approved|rejected)$"))
 
-client = LangFenceClient(
+client = fence.client(
     provider="openai-compatible",
     base_url="http://localhost:8000/v1",
     model="local-model",
-    contract=contract,
     max_retries=1,
 )
 
@@ -91,11 +100,12 @@ Provider names accepted by the client:
 For Anthropic-compatible endpoints, use the Messages API base URL:
 
 ```python
-client = LangFenceClient(
+import os
+
+client = fence.client(
     provider="anthropic",
     base_url="https://api.anthropic.com/v1",
     model="claude-compatible",
-    contract=contract,
     api_key=os.environ["ANTHROPIC_API_KEY"],
 )
 ```
